@@ -16,7 +16,7 @@ jobs:
 
     - name: Compile C++ Executable
       run: |
-        cl.exe /EHsc /std:c++latest main.cc /Fe:CS2-SchemaDumper.exe
+        cl.exe /EHsc /std:c++latest main.cc User32.lib /Fe:CS2-SchemaDumper.exe
 
     - name: Upload Executable Artifact
       uses: actions/upload-artifact@v4
