@@ -1,0 +1,25 @@
+name: Build CS2-SchemaDumper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up MSVC Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Compile C++ Executable
+      run: |
+        cl.exe /EHsc /std:c++latest main.cc /Fe:CS2-SchemaDumper.exe
+
+    - name: Upload Executable Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CS2-SchemaDumper-exe
+        path: CS2-SchemaDumper.exe
