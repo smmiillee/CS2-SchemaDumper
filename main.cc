@@ -1,190 +1,80 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
-#include <Windows.h>
-#include <Psapi.h>
+#include <fstream>
+#include <filesystem>
 
-#include "Memory.hpp"
-
-#include "CSchemaSystem.hpp"
 #include "ProcessMemory.hpp"
+#include "CSchemaSystem.hpp"
 
-#define DUMP_FOLDER_NAME "Classes"
+int main() {
+    SetConsoleTitleA("CS2 SchemaDumper");
 
-#define PRINT_ERROR(format, ...)  \
-{ \
-    printf(format, __VA_ARGS__); \
-    int m_Dummy = getchar(); \
-}
+    std::cout << "[ ~ ] Waiting for cs2.exe..." << std::endl;
 
-int main()
-{
-    HWND _GameWindow = FindWindowA(0, "Counter-Strike 2");
-    if (!_GameWindow)
-    {
-        PRINT_ERROR("[ ! ] Couldn't find 'Counter-Strike 2' window\n");
+    while (!ProcessMemory::Attach("cs2.exe")) {
+        Sleep(500);
+    }
+
+    std::cout << "[ + ] Attached to cs2.exe (PID: " << ProcessMemory::GetProcessId() << ")" << std::endl;
+
+    uintptr_t schemaSystemModule = ProcessMemory::GetModuleBase("schemasystem.dll");
+    if (!schemaSystemModule) {
+        std::cout << "[ - ] Failed to find schemasystem.dll module." << std::endl;
+        system("pause");
         return 1;
     }
 
-    DWORD _GameProcessID = 0x0;
-    GetWindowThreadProcessId(_GameWindow, &_GameProcessID);
-    if (!_GameProcessID)
-    {
-        PRINT_ERROR("[ ! ] Couldn't get process id from 'Counter-Strike 2' window\n");
-        return 1;
-    }
+    std::cout << "[ + ] Found schemasystem.dll at 0x" << std::hex << schemaSystemModule << std::dec << std::endl;
 
-    ProcessMemory _ProcessMem(OpenProcess(PROCESS_ALL_ACCESS, 0, _GameProcessID));
-    if (!_ProcessMem.m_Handle)
-    {
-        PRINT_ERROR("[ ! ] Couldn't OpenProcess to targeted process id\n");
-        return 1;
-    }
+    // Load local module to resolve exported CreateInterface entrypoint reliably
+    HMODULE hLocalSchema = LoadLibraryA("schemasystem.dll");
+    uintptr_t schemaSystemPtr = 0;
 
-    uintptr_t _SchemaModule[2] = { 0, 0 };
-    if (!_ProcessMem.GetModuleInfo("schemasystem.dll", &_SchemaModule[0], &_SchemaModule[1]))
-    {
-        PRINT_ERROR("[ ! ] Couldn't get module information for 'schemasystem.dll'\n");
-        return 1;
-    }
-
-    uintptr_t _SchemaSystemInterface = 0;
-    printf("[ ~ ] Searching for SchemaSystem Interface...\n");
-
-    // Signature scan for interface ptr...
-    {
-        uint8_t* _SchemaSystemBytes = new uint8_t[_SchemaModule[1]];
-        if (!_ProcessMem.Read(_SchemaModule[0], _SchemaSystemBytes, _SchemaModule[1]))
-        {
-            PRINT_ERROR("[ - ] Failed to read memory...\n");
-            return 1;
-        }
-
-        // Xref: CSchemaSystem::`vftable'
-        uintptr_t _SignatureAddress = Memory::FindSignature(reinterpret_cast<uintptr_t>(_SchemaSystemBytes), _SchemaModule[1], "48 89 05 ? ? ? ? 4C 8D 0D ? ? ? ? 0F B6 45 E8 4C 8D 45 E0 33 F6");
-        if (!_SignatureAddress)
-        {
-            PRINT_ERROR("[ - ] Signature scan failed, outdated signature?\n");
-            return 1;
-        }
-
-        _SchemaSystemInterface = _SchemaModule[0] + ((_SignatureAddress + static_cast<uintptr_t>(*reinterpret_cast<int*>(_SignatureAddress + 0x3)) + 0x7) - reinterpret_cast<uintptr_t>(_SchemaSystemBytes));
-        delete[] _SchemaSystemBytes;
-    }
-
-    SDK::CSchemaSystem _SchemaSystem = { 0 };
-    if (!_ProcessMem.Read(_SchemaSystemInterface, &_SchemaSystem))
-    {
-        PRINT_ERROR("[ - ] Failed to read SchemaSystem Interface...\n");
-        return 1;
-    }
-
-    uintptr_t _SchemaSystemScopeArrayPtr = 0;
-    if (!_ProcessMem.Read(_SchemaSystemInterface + (offsetof(SDK::CSchemaSystem, m_pScopeArray)), &_SchemaSystemScopeArrayPtr))
-    {
-        PRINT_ERROR("[ - ] Failed to read SchemaSystem::ScopeArrayPtr...\n");
-        return 1;
-    }
-
-    void** _ScopeArray = new void*[_SchemaSystem.m_nScopeSize];
-    if (!_ProcessMem.Read(_SchemaSystemScopeArrayPtr, _ScopeArray, (_SchemaSystem.m_nScopeSize * sizeof(void*))))
-    {
-        PRINT_ERROR("[ - ] Failed to read SchemaSystem::ScopeArray...\n");
-        return 1;
-    }
-
-    printf("[ ~ ] Dumping starting...\n");
-    CreateDirectoryA(DUMP_FOLDER_NAME, 0);
-
-    for (uint64_t s = 0; _SchemaSystem.m_nScopeSize > s; ++s)
-    {
-        SDK::CSchemaSystemTypeScope _SchemaScope = { 0 };
-        if (!_ProcessMem.Read(_ScopeArray[s], &_SchemaScope) || !_SchemaScope.m_pDeclaredClasses) {
-            continue;
-        }
-
-        printf("[ ~ ] Dumping Schema: %s:\n", _SchemaScope.m_szName);
-
-        char _DumpFileName[MAX_PATH] = { 0 };
-        sprintf_s(_DumpFileName, sizeof(_DumpFileName), DUMP_FOLDER_NAME"\\%s.hpp", _SchemaScope.m_szName);
-
-        FILE* _File = fopen(_DumpFileName, "w");
-        if (!_File) {
-            continue;
-        }
-
-        SDK::CSchemaDeclaredClassEntry* _DeclaredClassEntries = new SDK::CSchemaDeclaredClassEntry[_SchemaScope.m_nNumDeclaredClasses + 1];
-        if (!_ProcessMem.Read(_SchemaScope.m_pDeclaredClasses, _DeclaredClassEntries, (_SchemaScope.m_nNumDeclaredClasses + 1) * sizeof(SDK::CSchemaDeclaredClassEntry))) {
-            continue;
-        }
-
-        for (uint16_t c = 0; _SchemaScope.m_nNumDeclaredClasses >= c; ++c)
-        {
-            SDK::CSchemaDeclaredClass _DeclaredClass;
-            if (!_ProcessMem.Read(_DeclaredClassEntries[c].m_pDeclaredClass, &_DeclaredClass)) {
-                continue;
+    if (hLocalSchema) {
+        typedef void* (*CreateInterfaceFn)(const char* pName, int* pReturnCode);
+        CreateInterfaceFn CreateInterface = (CreateInterfaceFn)GetProcAddress(hLocalSchema, "CreateInterface");
+        
+        if (CreateInterface) {
+            // Find signature pattern for SchemaSystem global pointer from CreateInterface export
+            schemaSystemPtr = ProcessMemory::Scan("schemasystem.dll", "48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 48 89 5C 24");
+            if (schemaSystemPtr) {
+                schemaSystemPtr = ProcessMemory::RelativeDisplacement(schemaSystemPtr, 0x3, 0x7);
             }
-
-            SDK::CSchemaClass _Class = { 0 };
-            if (!_ProcessMem.Read(_DeclaredClass.m_Class, &_Class)) {
-                continue;
-            }
-
-            char _ClassName[128] = { 0 };
-            if (!_ProcessMem.Read((void*)(_Class.m_szName), _ClassName, sizeof(_ClassName))) {
-                continue;
-            }
-
-            printf("\n[ ~ ] Dumping Class: %s:\n", _ClassName);
-            fprintf(_File, "namespace %s\n{\n", _ClassName);
-
-            uintptr_t _ClassFieldsPtr = reinterpret_cast<uintptr_t>(_Class.m_pFields);
-            if (_ClassFieldsPtr)
-            {
-                for (uint16_t f = 0; _Class.m_nNumFields > f; ++f)
-                {
-                    SDK::CSchemaField _Field = { 0 };
-                    if (!_ProcessMem.Read(_ClassFieldsPtr + sizeof(SDK::CSchemaField) * f, &_Field)) {
-                        continue;
-                    }
-
-                    if (!_Field.m_pType) {
-                        continue;
-                    }
-
-                    char _FieldName[128] = { 0 };
-                    if (!_ProcessMem.Read((void*)(_Field.m_szName), _FieldName, sizeof(_FieldName))) {
-                        continue;
-                    }
-
-                    size_t _FieldNameSize = strlen(_FieldName);
-                    bool _IsNameValid = (_FieldNameSize > 0);
-                    {
-                        for (size_t n = 0; _FieldNameSize > n; ++n)
-                        {
-                            if (!isascii(_FieldName[n]))
-                            {
-                                _IsNameValid = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (!_IsNameValid) {
-                        continue;
-                    }
-
-                    printf("[ + ] %s->%s:: 0x%X\n", _ClassName, _FieldName, _Field.m_nOffset);
-                    fprintf(_File, "\tconstexpr uint32_t %s = 0x%X;\n", _FieldName, _Field.m_nOffset);
-                }
-            }
-
-            fprintf(_File, "}\n\n");
         }
-
-        printf("\n");
-        fclose(_File);
+        FreeLibrary(hLocalSchema);
     }
 
-    delete[] _ScopeArray;
+    // Fallback pattern scan if export address resolution fails
+    if (!schemaSystemPtr) {
+        schemaSystemPtr = ProcessMemory::Scan("schemasystem.dll", "48 89 05 ? ? ? ? 48 8D 0D ? ? ? ? 48 8B 01");
+        if (schemaSystemPtr) {
+            schemaSystemPtr = ProcessMemory::RelativeDisplacement(schemaSystemPtr, 0x3, 0x7);
+        }
+    }
 
+    if (!schemaSystemPtr) {
+        std::cout << "[ - ] Signature scan failed. Make sure CS2 is running and at the main menu." << std::endl;
+        system("pause");
+        return 1;
+    }
+
+    uintptr_t pSchemaSystem = ProcessMemory::Read<uintptr_t>(schemaSystemPtr);
+    if (!pSchemaSystem) {
+        std::cout << "[ - ] Invalid SchemaSystem pointer." << std::endl;
+        system("pause");
+        return 1;
+    }
+
+    std::cout << "[ + ] SchemaSystem instance found at 0x" << std::hex << pSchemaSystem << std::dec << std::endl;
+
+    CSchemaSystem schemaSystem(pSchemaSystem);
+    
+    std::filesystem::create_directory("output");
+
+    std::cout << "[ ~ ] Dumping schema type scopes..." << std::endl;
+    schemaSystem.DumpTypeScopes("output");
+
+    std::cout << "[ + ] Dump completed successfully! Files saved to 'output' folder." << std::endl;
+
+    system("pause");
     return 0;
 }
